@@ -265,21 +265,24 @@ func (p *wireProtocol) resumeBuffer(buf []byte) {
 	p.buf = buf
 }
 
-func (p *wireProtocol) recvPackets(n int) ([]byte, error) {
-	buf := make([]byte, n)
+func (p *wireProtocol) recvPacketsStatic(bufp *[]byte) error {
+	buf := *bufp
+	n := len(buf)
 	var err error
 	read := 0
 	totalRead := 0
 	for totalRead < n {
-		read, err = p.conn.Read(buf[totalRead:n])
+		if totalRead == 0 {
+			read, err = p.conn.Read(buf)
+		} else {
+			read, err = p.conn.Read(buf[totalRead:n])
+		}
 		if err != nil {
-			p.debugPrint("\trecvPackets():%v:%v", buf, err)
-			return buf, err
+			return err
 		}
 		totalRead += read
 	}
-	p.debugPrint("\trecvPackets():%v:%v", buf, err)
-	return buf, err
+	return nil
 }
 
 func (p *wireProtocol) recvPacketsAlignment(n int) ([]byte, error) {
@@ -287,7 +290,8 @@ func (p *wireProtocol) recvPacketsAlignment(n int) ([]byte, error) {
 	if padding > 0 {
 		padding = 4 - padding
 	}
-	buf, err := p.recvPackets(n + padding)
+	buf := make([]byte, n+padding)
+	err := p.recvPacketsStatic(&buf)
 	return buf[0:n], err
 }
 
@@ -298,12 +302,15 @@ func (p *wireProtocol) _parse_status_vector() (*list.List, int, string, error) {
 	num_arg := 0
 	message := ""
 
-	b, err := p.recvPackets(4)
+	var err error
+
+	b := make([]byte, 4)
+	p.recvPacketsStatic(&b)
 	n := bytes_to_bint32(b)
 	for n != isc_arg_end {
 		switch {
 		case n == isc_arg_gds:
-			b, err = p.recvPackets(4)
+			p.recvPacketsStatic(&b)
 			gds_code := int(bytes_to_bint32(b))
 			if gds_code != 0 {
 				gds_codes.PushBack(gds_code)
@@ -311,7 +318,7 @@ func (p *wireProtocol) _parse_status_vector() (*list.List, int, string, error) {
 				num_arg = 0
 			}
 		case n == isc_arg_number:
-			b, err = p.recvPackets(4)
+			p.recvPacketsStatic(&b)
 			num := int(bytes_to_bint32(b))
 			if gds_code == 335544436 {
 				sql_code = num
@@ -319,25 +326,25 @@ func (p *wireProtocol) _parse_status_vector() (*list.List, int, string, error) {
 			num_arg += 1
 			message = strings.Replace(message, "@"+strconv.Itoa(num_arg), strconv.Itoa(num), 1)
 		case n == isc_arg_string:
-			b, err = p.recvPackets(4)
+			p.recvPacketsStatic(&b)
 			nbytes := int(bytes_to_bint32(b))
-			b, err = p.recvPacketsAlignment(nbytes)
-			s := bytes_to_str(b)
+			buf, _ := p.recvPacketsAlignment(nbytes)
+			s := bytes_to_str(buf)
 			num_arg += 1
 			message = strings.Replace(message, "@"+strconv.Itoa(num_arg), s, 1)
 		case n == isc_arg_interpreted:
-			b, err = p.recvPackets(4)
+			p.recvPacketsStatic(&b)
 			nbytes := int(bytes_to_bint32(b))
-			b, err = p.recvPacketsAlignment(nbytes)
-			s := bytes_to_str(b)
+			buf, _ := p.recvPacketsAlignment(nbytes)
+			s := bytes_to_str(buf)
 			message += s
 		case n == isc_arg_sql_state:
-			b, err = p.recvPackets(4)
+			p.recvPacketsStatic(&b)
 			nbytes := int(bytes_to_bint32(b))
-			b, err = p.recvPacketsAlignment(nbytes)
-			_ = bytes_to_str(b) // skip status code
+			buf, _ := p.recvPacketsAlignment(nbytes)
+			_ = bytes_to_str(buf) // skip status code
 		}
-		b, err = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 		n = bytes_to_bint32(b)
 	}
 
@@ -345,10 +352,12 @@ func (p *wireProtocol) _parse_status_vector() (*list.List, int, string, error) {
 }
 
 func (p *wireProtocol) _parse_op_response() (int32, []byte, []byte, error) {
-	b, err := p.recvPackets(16)
-	h := bytes_to_bint32(b[0:4])            // Object handle
-	oid := b[4:12]                          // Object ID
-	buf_len := int(bytes_to_bint32(b[12:])) // buffer length
+	b := make([]byte, 4)
+	p.recvPacketsStatic(&b)
+	h := bytes_to_bint32(b)               // Object handle
+	oid, err := p.recvPacketsAlignment(8) // Object ID
+	p.recvPacketsStatic(&b)
+	buf_len := int(bytes_to_bint32(b)) // buffer length
 	buf, err := p.recvPacketsAlignment(buf_len)
 
 	gds_code_list, sql_code, message, err := p._parse_status_vector()
@@ -570,11 +579,12 @@ func (p *wireProtocol) opCreate(dbName string, user string, password string, rol
 func (p *wireProtocol) opAccept(user string, password string, authPluginName string, wireCrypt bool, clientPublic *big.Int, clientSecret *big.Int) (err error) {
 	p.debugPrint("opAccept")
 
-	b, err := p.recvPackets(4)
+	b := make([]byte, 4)
+	p.recvPacketsStatic(&b)
 	opcode := bytes_to_bint32(b)
 
 	for opcode == op_dummy {
-		b, _ = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 		opcode = bytes_to_bint32(b)
 	}
 
@@ -587,28 +597,30 @@ func (p *wireProtocol) opAccept(user string, password string, authPluginName str
 		return
 	}
 
-	b, _ = p.recvPackets(12)
+	p.recvPacketsStatic(&b)
 	p.protocolVersion = int32(b[3])
-	p.acceptArchitecture = bytes_to_bint32(b[4:8])
-	p.acceptType = bytes_to_bint32(b[8:12])
+	p.recvPacketsStatic(&b)
+	p.acceptArchitecture = bytes_to_bint32(b)
+	p.recvPacketsStatic(&b)
+	p.acceptType = bytes_to_bint32(b)
 
 	if opcode == op_cond_accept || opcode == op_accept_data {
 		var readLength, ln int
 
-		b, _ := p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 		ln = int(bytes_to_bint32(b))
 		data, _ := p.recvPacketsAlignment(ln)
 
-		b, _ = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 		ln = int(bytes_to_bint32(b))
 		pluginName, _ := p.recvPacketsAlignment(ln)
 		p.pluginName = bytes_to_str(pluginName)
 
-		b, _ = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 		isAuthenticated := bytes_to_bint32(b)
 		readLength += 4
 
-		b, _ = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 		ln = int(bytes_to_bint32(b))
 		_, _ = p.recvPacketsAlignment(ln) // keys
 
@@ -872,17 +884,21 @@ func (p *wireProtocol) opFetch(stmtHandle int32, blr []byte) {
 }
 
 func (p *wireProtocol) opFetchResponse(stmtHandle int32, transHandle int32, xsqlda []xSQLVAR) (*list.List, bool, error) {
+	var err error
+
 	p.debugPrint("opFetchResponse")
-	b, err := p.recvPackets(4)
+	b := make([]byte, 4)
+	p.recvPacketsStatic(&b)
 	for bytes_to_bint32(b) == op_dummy {
-		b, _ = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 	}
 
 	for bytes_to_bint32(b) == op_response && p.lazyResponseCount > 0 {
 		p.lazyResponseCount--
 		p._parse_op_response()
-		b, _ = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 	}
+
 	if bytes_to_bint32(b) != op_fetch_response {
 		if bytes_to_bint32(b) == op_response {
 			_, _, _, err := p._parse_op_response()
@@ -892,9 +908,10 @@ func (p *wireProtocol) opFetchResponse(stmtHandle int32, transHandle int32, xsql
 		}
 		return nil, false, errors.New("opFetchResponse:Internal Error")
 	}
-	b, err = p.recvPackets(8)
-	status := bytes_to_bint32(b[:4])
-	count := int(bytes_to_bint32(b[4:8]))
+	p.recvPacketsStatic(&b)
+	status := bytes_to_bint32(b)
+	p.recvPacketsStatic(&b)
+	count := int(bytes_to_bint32(b))
 	rows := list.New()
 
 	for count > 0 {
@@ -903,13 +920,13 @@ func (p *wireProtocol) opFetchResponse(stmtHandle int32, transHandle int32, xsql
 			for i, x := range xsqlda {
 				var ln int
 				if x.ioLength() < 0 {
-					b, err = p.recvPackets(4)
+					p.recvPacketsStatic(&b)
 					ln = int(bytes_to_bint32(b))
 				} else {
 					ln = x.ioLength()
 				}
 				raw_value, _ := p.recvPacketsAlignment(ln)
-				b, err = p.recvPackets(4)
+				p.recvPacketsStatic(&b)
 				if bytes_to_bint32(b) == 0 { // Not NULL
 					r[i], err = x.value(raw_value)
 				}
@@ -934,7 +951,7 @@ func (p *wireProtocol) opFetchResponse(stmtHandle int32, transHandle int32, xsql
 				}
 				var ln int
 				if x.ioLength() < 0 {
-					b, err = p.recvPackets(4)
+					p.recvPacketsStatic(&b)
 					ln = int(bytes_to_bint32(b))
 				} else {
 					ln = x.ioLength()
@@ -946,10 +963,12 @@ func (p *wireProtocol) opFetchResponse(stmtHandle int32, transHandle int32, xsql
 
 		rows.PushBack(r)
 
-		b, err = p.recvPackets(12)
+		p.recvPacketsStatic(&b)
 		// op := int(bytes_to_bint32(b[:4]))
-		status = bytes_to_bint32(b[4:8])
-		count = int(bytes_to_bint32(b[8:]))
+		p.recvPacketsStatic(&b)
+		status = bytes_to_bint32(b)
+		p.recvPacketsStatic(&b)
+		count = int(bytes_to_bint32(b))
 	}
 
 	return rows, status != 100, err
@@ -1025,15 +1044,16 @@ func (p *wireProtocol) opCloseBlob(blobHandle int32) {
 }
 
 func (p *wireProtocol) opResponse() (int32, []byte, []byte, error) {
+	b := make([]byte, 4)
 	p.debugPrint("opResponse")
-	b, _ := p.recvPackets(4)
+	p.recvPacketsStatic(&b)
 	for bytes_to_bint32(b) == op_dummy {
-		b, _ = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 	}
 	for bytes_to_bint32(b) == op_response && p.lazyResponseCount > 0 {
 		p.lazyResponseCount--
 		_, _, _, _ = p._parse_op_response()
-		b, _ = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 	}
 
 	if bytes_to_bint32(b) != op_response {
@@ -1046,17 +1066,20 @@ func (p *wireProtocol) opResponse() (int32, []byte, []byte, error) {
 }
 
 func (p *wireProtocol) opSqlResponse(xsqlda []xSQLVAR) ([]driver.Value, error) {
+	var err error
+
 	p.debugPrint("opSqlResponse")
-	b, err := p.recvPackets(4)
+	b := make([]byte, 4)
+	p.recvPacketsStatic(&b)
 	for bytes_to_bint32(b) == op_dummy {
-		b, err = p.recvPackets(4)
+		p.recvPacketsStatic(&b)
 	}
 
 	if bytes_to_bint32(b) != op_sql_response {
 		return nil, errors.New("Error op_sql_response")
 	}
 
-	b, err = p.recvPackets(4)
+	p.recvPacketsStatic(&b)
 	// count := int(bytes_to_bint32(b))
 
 	r := make([]driver.Value, len(xsqlda))
@@ -1065,13 +1088,13 @@ func (p *wireProtocol) opSqlResponse(xsqlda []xSQLVAR) ([]driver.Value, error) {
 	if p.protocolVersion < PROTOCOL_VERSION13 {
 		for i, x := range xsqlda {
 			if x.ioLength() < 0 {
-				b, err = p.recvPackets(4)
+				p.recvPacketsStatic(&b)
 				ln = int(bytes_to_bint32(b))
 			} else {
 				ln = x.ioLength()
 			}
 			raw_value, _ := p.recvPacketsAlignment(ln)
-			b, err = p.recvPackets(4)
+			p.recvPacketsStatic(&b)
 			if bytes_to_bint32(b) == 0 { // Not NULL
 				r[i], err = x.value(raw_value)
 			}
@@ -1095,7 +1118,7 @@ func (p *wireProtocol) opSqlResponse(xsqlda []xSQLVAR) ([]driver.Value, error) {
 				continue
 			}
 			if x.ioLength() < 0 {
-				b, err = p.recvPackets(4)
+				p.recvPacketsStatic(&b)
 				ln = int(bytes_to_bint32(b))
 			} else {
 				ln = x.ioLength()
