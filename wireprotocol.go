@@ -46,7 +46,7 @@ import (
 
 const (
 	PLUGIN_LIST       = "Srp256,Srp,Legacy_Auth"
-	BUFFER_LEN        = 1024
+	BUFFER_LEN        = 1024 * 16
 	MAX_CHAR_LENGTH   = 32767
 	BLOB_SEGMENT_SIZE = 32000
 )
